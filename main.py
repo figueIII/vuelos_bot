@@ -5,7 +5,7 @@ from datetime import datetime
 import gspread
 from serpapi import GoogleSearch
 
-
+# --- CONFIGURACIÓN ---
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID") or "1myuJ5i6jN8rnYD3EpDkLyOs-RYRaG0T9_emOwqmAJ54" 
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY") or "d82d8ac259deb4cf3f730e4f722ad0c67ecfe1e8e4d3b72eb61c645eb1092a81"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "8460226319:AAG_rQRSFImtrKSA15QD4b61yfr_daIFgFU"
@@ -33,15 +33,22 @@ def obtener_minimo_historico(sheet, tipo_vuelo):
         registros = sheet.get_all_values()
         precios = []
         
-        # Asumimos estructura: [Fecha, TIPO, FechaVuelo, Origen, Destino, Aerolinea, PRECIO]
-        # El precio está en la columna 7 (índice 6)
-        # El TIPO está en la columna 2 (índice 1)
+        # NUEVA ESTRUCTURA SOLICITADA:
+        # 0: Fecha Busqueda
+        # 1: Tipo (IDA/VUELTA)
+        # 2: Fecha Vuelo
+        # 3: Numero Vuelo
+        # 4: Hora Salida
+        # 5: Hora Llegada
+        # 6: Aerolinea
+        # 7: PRECIO (Ahora es la columna H, índice 7)
         
         for fila in registros[1:]: # Saltamos encabezados
-            if len(fila) > 6 and fila[1] == tipo_vuelo:
+            # Verificamos que la fila tenga datos suficientes y coincida el TIPO
+            if len(fila) > 7 and fila[1] == tipo_vuelo:
                 try:
                     # Limpiamos el símbolo de euro si existe
-                    precio_limpio = float(str(fila[6]).replace("€", "").strip())
+                    precio_limpio = float(str(fila[7]).replace("€", "").strip())
                     precios.append(precio_limpio)
                 except ValueError:
                     continue 
@@ -51,7 +58,7 @@ def obtener_minimo_historico(sheet, tipo_vuelo):
         else:
             return 999999.0 # Si es la primera vez, ponemos un precio muy alto
     except Exception as e:
-        print(f"   ⚠️ No se pudo leer histórico (es normal si la hoja está vacía): {e}")
+        print(f"   ⚠️ No se pudo leer histórico (es normal si la hoja está vacía o has cambiado columnas): {e}")
         return 999999.0
 
 def buscar_vuelo_one_way(origen, destino, fecha):
@@ -75,12 +82,32 @@ def buscar_vuelo_one_way(origen, destino, fecha):
         if vuelos:
             mejor = vuelos[0]
             precio = mejor.get("price")
-            aerolinea = mejor.get("flights", [{}])[0].get("airline")
-            print(f"   ✅ {precio}€ ({aerolinea})")
-            return precio, aerolinea
-        return None, None
-    except Exception:
-        return None, None
+            
+            # --- NUEVA EXTRACCIÓN DETALLADA ---
+            tramo = mejor.get("flights", [{}])[0]
+            aerolinea = tramo.get("airline")
+            numero_vuelo = tramo.get("flight_number")
+            
+            # Las horas vienen formato "YYYY-MM-DD HH:MM", hacemos split para sacar solo la hora
+            raw_salida = tramo.get("departure_airport", {}).get("time", "")
+            raw_llegada = tramo.get("arrival_airport", {}).get("time", "")
+            
+            hora_salida = raw_salida.split(" ")[1] if " " in raw_salida else raw_salida
+            hora_llegada = raw_llegada.split(" ")[1] if " " in raw_llegada else raw_llegada
+            
+            print(f"   ✅ {precio}€ | {aerolinea} {numero_vuelo} ({hora_salida}-{hora_llegada})")
+            
+            return {
+                "precio": precio,
+                "aerolinea": aerolinea,
+                "numero_vuelo": numero_vuelo,
+                "hora_salida": hora_salida,
+                "hora_llegada": hora_llegada
+            }
+        return None
+    except Exception as e:
+        print(f"   ❌ Error en búsqueda: {e}")
+        return None
 
 def guardar_y_avisar(datos, tipo_analisis):
     print(f"💾 Procesando datos de {tipo_analisis}...")
@@ -111,14 +138,16 @@ def guardar_y_avisar(datos, tipo_analisis):
         encontrado_chollo = False
 
         for fila in datos:
-            # fila = [FechaHoy, TIPO, FechaVuelo, Origen, Destino, Aerolinea, Precio]
-            precio_nuevo = fila[6]
+            # Índice 7 es el precio en la nueva estructura
+            # fila = [FechaHoy, Tipo, FechaVuelo, NumVuelo, H.Salida, H.Llegada, Aerolinea, Precio]
+            precio_nuevo = fila[7] 
             
             if precio_nuevo < precio_record:
                 encontrado_chollo = True
                 mensaje_acumulado += (
-                    f"📅 *{fila[2]}* ({fila[5]}): *{precio_nuevo}€* "
-                    f"(Antes: {precio_record}€)\n"
+                    f"📅 *{fila[2]}* | {fila[6]} {fila[3]}\n"
+                    f"⏰ {fila[4]} - {fila[5]}\n"
+                    f"💰 *{precio_nuevo}€* (Antes: {precio_record}€)\n\n"
                 )
 
         if encontrado_chollo:
@@ -137,9 +166,19 @@ if __name__ == "__main__":
     datos_ida = []
     print("\n--- 1. BUSCANDO IDAS ---")
     for fecha in FECHAS_IDA:
-        precio, aerolinea = buscar_vuelo_one_way("BCN", "DUB", fecha)
-        if precio:
-            datos_ida.append([fecha_hoy, "IDA", fecha, "BCN", "DUB", aerolinea, precio])
+        res = buscar_vuelo_one_way("BCN", "DUB", fecha)
+        if res:
+            # ESTRUCTURA: Fecha Busq | Tipo | Fecha Vuelo | Nº Vuelo | H. Salida | H. Llegada | Aerolínea | Precio
+            datos_ida.append([
+                fecha_hoy, 
+                "IDA", 
+                fecha, 
+                res["numero_vuelo"], 
+                res["hora_salida"], 
+                res["hora_llegada"], 
+                res["aerolinea"], 
+                res["precio"]
+            ])
         time.sleep(1)
     
     if datos_ida:
@@ -149,10 +188,20 @@ if __name__ == "__main__":
     datos_vuelta = []
     print("\n--- 2. BUSCANDO VUELTAS ---")
     for fecha in FECHAS_VUELTA:
-        precio, aerolinea = buscar_vuelo_one_way("DUB", "BCN", fecha)
-        if precio:
-            datos_vuelta.append([fecha_hoy, "VUELTA", fecha, "DUB", "BCN", aerolinea, precio])
+        res = buscar_vuelo_one_way("DUB", "BCN", fecha)
+        if res:
+            datos_vuelta.append([
+                fecha_hoy, 
+                "VUELTA", 
+                fecha, 
+                res["numero_vuelo"], 
+                res["hora_salida"], 
+                res["hora_llegada"], 
+                res["aerolinea"], 
+                res["precio"]
+            ])
         time.sleep(1)
 
     if datos_vuelta:
         guardar_y_avisar(datos_vuelta, "VUELTA")
+
