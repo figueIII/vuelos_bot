@@ -1,0 +1,7 @@
+google-api-python-client
+google-auth
+gspread
+oauth2client
+serpapi
+google-search-results
+requests

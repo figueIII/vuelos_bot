@@ -1,0 +1,34 @@
+name: Bot Vuelos Diario
+
+on:
+  schedule:
+    # Esto ejecuta el bot todos los días a las 08:00 UTC (Adáptalo a tu hora)
+    - cron: '0 8 * * *' 
+  workflow_dispatch: # Permite darle a un botón "Play" manual para probar
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Bajar código
+      uses: actions/checkout@v3
+
+    - name: Instalar Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Instalar librerías
+      run: |
+        pip install -r requirements.txt
+
+    - name: Ejecutar Bot
+      env:
+        # Aquí conectamos las "cajas fuertes" de GitHub con tu código
+        GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+        SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      run: python main.py
