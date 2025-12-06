@@ -3,7 +3,7 @@ name: Bot Vuelos Diario
 on:
   schedule:
     # Esto ejecuta el bot todos los días a las 08:00 UTC (Adáptalo a tu hora)
-    - cron: '0 8 * * *' 
+    - cron: '19 5 * * *' 
   workflow_dispatch: # Permite darle a un botón "Play" manual para probar
 
 jobs:

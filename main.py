@@ -5,7 +5,7 @@ from datetime import datetime
 import gspread
 from serpapi import GoogleSearch
 
-
+# --- CONFIGURACIÓN ---
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID") or "1myuJ5i6jN8rnYD3EpDkLyOs-RYRaG0T9_emOwqmAJ54" 
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY") or "d82d8ac259deb4cf3f730e4f722ad0c67ecfe1e8e4d3b72eb61c645eb1092a81"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "8460226319:AAG_rQRSFImtrKSA15QD4b61yfr_daIFgFU"
@@ -23,7 +23,6 @@ def enviar_telegram(mensaje):
     try:
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
         requests.post(url, data=data)
-        print("   📱 Notificación enviada a Telegram.")
     except Exception as e:
         print(f"   ⚠️ Error enviando Telegram: {e}")
 
@@ -32,26 +31,15 @@ def obtener_minimo_historico(sheet, tipo_vuelo):
     try:
         registros = sheet.get_all_values()
         precios = []
-        
-        # Asumimos estructura: [Fecha, TIPO, FechaVuelo, Origen, Destino, Aerolinea, PRECIO]
-        # El precio está en la columna 7 (índice 6)
-        # El TIPO está en la columna 2 (índice 1)
-        
-        for fila in registros[1:]: # Saltamos encabezados
+        for fila in registros[1:]: 
             if len(fila) > 6 and fila[1] == tipo_vuelo:
                 try:
-                    # Limpiamos el símbolo de euro si existe
                     precio_limpio = float(str(fila[6]).replace("€", "").strip())
                     precios.append(precio_limpio)
                 except ValueError:
                     continue 
-        
-        if precios:
-            return min(precios)
-        else:
-            return 999999.0 # Si es la primera vez, ponemos un precio muy alto
-    except Exception as e:
-        print(f"   ⚠️ No se pudo leer histórico (es normal si la hoja está vacía): {e}")
+        return min(precios) if precios else 999999.0
+    except Exception:
         return 999999.0
 
 def buscar_vuelo_one_way(origen, destino, fecha):
@@ -61,7 +49,7 @@ def buscar_vuelo_one_way(origen, destino, fecha):
       "departure_id": origen,
       "arrival_id": destino,
       "outbound_date": fecha,
-      "type": "2", # Solo ida
+      "type": "2", 
       "currency": "EUR",
       "hl": "es",
       "api_key": SERPAPI_KEY
@@ -85,7 +73,6 @@ def buscar_vuelo_one_way(origen, destino, fecha):
 def guardar_y_avisar(datos, tipo_analisis):
     print(f"💾 Procesando datos de {tipo_analisis}...")
     
-    # Conexión a Sheets
     archivo_creds = 'credentials.json'
     if not os.path.exists(archivo_creds):
         creds = os.environ.get("GCP_CREDENTIALS")
@@ -98,22 +85,15 @@ def guardar_y_avisar(datos, tipo_analisis):
         sh = gc.open_by_key(SPREADSHEET_ID)
         worksheet = sh.sheet1
         
-        # 1. Obtenemos el precio récord ANTES de guardar lo nuevo
         precio_record = obtener_minimo_historico(worksheet, tipo_analisis)
-        print(f"   📊 Récord actual ({tipo_analisis}): {precio_record}€")
-
-        # 2. Guardamos los nuevos datos
         worksheet.append_rows(datos)
         print(f"   💾 Guardado en Excel.")
 
-        # 3. Comprobamos si hay CHOLLO
         mensaje_acumulado = ""
         encontrado_chollo = False
 
         for fila in datos:
-            # fila = [FechaHoy, TIPO, FechaVuelo, Origen, Destino, Aerolinea, Precio]
             precio_nuevo = fila[6]
-            
             if precio_nuevo < precio_record:
                 encontrado_chollo = True
                 mensaje_acumulado += (
@@ -129,11 +109,65 @@ def guardar_y_avisar(datos, tipo_analisis):
     except Exception as e:
         print(f"❌ Error en guardado/aviso: {e}")
 
-# --- EJECUCIÓN ---
+# --- NUEVA FUNCIÓN: LEER RESUMEN DE HOY ---
+def generar_resumen_hoy():
+    """Lee la hoja y devuelve los precios guardados HOY"""
+    print("🔎 Generando resumen bajo demanda...")
+    archivo_creds = 'credentials.json'
+    if not os.path.exists(archivo_creds): return "❌ Error: No hay credenciales."
+
+    try:
+        gc = gspread.service_account(filename=archivo_creds)
+        sh = gc.open_by_key(SPREADSHEET_ID)
+        worksheet = sh.sheet1
+        registros = worksheet.get_all_values()
+        
+        hoy_str = datetime.now().strftime("%Y-%m-%d") # Ej: 2025-10-25
+        mensaje = f"📊 *RESUMEN DE PRECIOS ({hoy_str})*\n\n"
+        encontrado = False
+
+        # Estructura: [FechaHoy, TIPO, FechaVuelo, Origen, Destino, Aerolinea, Precio]
+        for fila in registros[1:]:
+            # Comprobamos si la columna 0 (Fecha Búsqueda) contiene la fecha de hoy
+            if len(fila) > 6 and hoy_str in str(fila[0]):
+                encontrado = True
+                tipo = fila[1] # IDA o VUELTA
+                fecha_vuelo = fila[2]
+                aerolinea = fila[5]
+                precio = fila[6]
+                icon = "🛫" if tipo == "IDA" else "🛬"
+                
+                mensaje += f"{icon} *{tipo}* ({fecha_vuelo}): *{precio}€* - {aerolinea}\n"
+
+        if not encontrado:
+            return "⚠️ No he encontrado datos guardados con fecha de hoy."
+        
+        return mensaje
+
+    except Exception as e:
+        return f"❌ Error leyendo la hoja: {e}"
+
+# --- NUEVA FUNCIÓN: ESCUCHAR TELEGRAM ---
+def escuchar_telegram(offset=None):
+    """Consulta si hay mensajes nuevos"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    params = {"timeout": 10, "offset": offset}
+    try:
+        response = requests.get(url, params=params).json()
+        return response.get("result", [])
+    except Exception as e:
+        print(f"Error polling Telegram: {e}")
+        return []
+
+# --- EJECUCIÓN PRINCIPAL ---
 if __name__ == "__main__":
+    
+    # 1. EJECUCIÓN INICIAL (BÚSQUEDA)
+    # -------------------------------------------------
+    print("🚀 Iniciando escaneo diario...")
     fecha_hoy = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # 1. BARRIDO DE IDAS
+    # IDAS
     datos_ida = []
     print("\n--- 1. BUSCANDO IDAS ---")
     for fecha in FECHAS_IDA:
@@ -141,11 +175,9 @@ if __name__ == "__main__":
         if precio:
             datos_ida.append([fecha_hoy, "IDA", fecha, "BCN", "DUB", aerolinea, precio])
         time.sleep(1)
-    
-    if datos_ida:
-        guardar_y_avisar(datos_ida, "IDA")
+    if datos_ida: guardar_y_avisar(datos_ida, "IDA")
 
-    # 2. BARRIDO DE VUELTAS
+    # VUELTAS
     datos_vuelta = []
     print("\n--- 2. BUSCANDO VUELTAS ---")
     for fecha in FECHAS_VUELTA:
@@ -153,6 +185,34 @@ if __name__ == "__main__":
         if precio:
             datos_vuelta.append([fecha_hoy, "VUELTA", fecha, "DUB", "BCN", aerolinea, precio])
         time.sleep(1)
+    if datos_vuelta: guardar_y_avisar(datos_vuelta, "VUELTA")
+    
+    print("\n✅ Escaneo completado.")
 
-    if datos_vuelta:
-        guardar_y_avisar(datos_vuelta, "VUELTA")
+    # 2. MODO ESCUCHA (RESPONDER A /PRICES)
+    # -------------------------------------------------
+    print("\n👂 Escuchando comandos de Telegram (Ctrl+C para salir)...")
+    ultimo_update_id = None
+    
+    while True:
+        updates = escuchar_telegram(ultimo_update_id)
+        
+        for update in updates:
+            ultimo_update_id = update["update_id"] + 1
+            
+            # Verificamos si es un mensaje de texto
+            if "message" in update and "text" in update["message"]:
+                texto = update["message"]["text"]
+                chat_id_usuario = str(update["message"]["chat"]["id"])
+                
+                # Solo respondemos si eres tú (seguridad básica)
+                if chat_id_usuario == TELEGRAM_CHAT_ID:
+                    if texto.strip() == "/prices":
+                        print("   📩 Recibido comando /prices")
+                        enviar_telegram("🔎 Buscando precios de hoy en la hoja...")
+                        resumen = generar_resumen_hoy()
+                        enviar_telegram(resumen)
+                    else:
+                        print(f"   Mensaje ignorado: {texto}")
+        
+        time.sleep(2) # Espera 2 segundos antes de volver a comprobar
